@@ -1,0 +1,16 @@
+# Runs backend + frontend together:  docker compose up --build
+services:
+  backend:
+    build: .
+    env_file: .env
+    environment:
+      - API_HOST=0.0.0.0
+    ports: ["8000:8000"]
+  frontend:
+    build: .
+    env_file: .env
+    environment:
+      - BACKEND_URL=http://backend:8000
+    command: streamlit run frontend/app.py --server.address 0.0.0.0 --server.port 8501
+    ports: ["8501:8501"]
+    depends_on: [backend]
