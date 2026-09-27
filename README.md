@@ -138,11 +138,27 @@ curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" 
 | Document always says "MOCK MODE" | No key was found, or `MOCK_MODE=true`. Fix `.env` and restart the backend. |
 | Port already in use | Use `uvicorn legalEaseAPI.main:app --port 8001` and set `BACKEND_URL=http://127.0.0.1:8001` in `.env`. |
 
-## 6. Deployment (optional)
+## 6. Deployment (free public link)
 
-- **Docker (both services):** `docker compose up --build`, then open http://localhost:8501.
-- **Render / Railway (backend):** the `Procfile` runs `uvicorn legalEaseAPI.main:app --host 0.0.0.0 --port $PORT`. Add `GEMINI_API_KEY` as an environment variable.
-- **Streamlit Community Cloud (frontend):** main file `frontend/app.py`. Set `BACKEND_URL` to your deployed backend URL in the app's secrets or environment. Also add that frontend URL to `CORS_ORIGINS` on the backend.
+**Streamlit Community Cloud** runs the app in *standalone mode*, where the Streamlit app calls Gemini directly and no separate backend is needed.
+
+1. Push the latest code to GitHub.
+2. Go to https://share.streamlit.io and sign in with GitHub.
+3. Click **Create app → Deploy a public app from GitHub**.
+4. Fill in the form:
+   - **Repository:** `Rithivik/LegalEase`
+   - **Branch:** `main`
+   - **Main file path:** `frontend/app.py`
+   - **App URL:** pick a name, e.g. `legalease-ai`
+5. Open **Advanced settings**, set **Python version** to **3.12**, and paste the following into **Secrets**:
+   ```toml
+   GEMINI_API_KEY = "your-key-here"
+   GEMINI_MODEL = "gemini-flash-latest"
+   APP_MODE = "standalone"
+   ```
+6. Click **Deploy**. The first build takes a few minutes, and then you get a public link.
+
+The backend can also be deployed separately (Render/Railway via `Procfile`, or `docker compose up --build`). If you do that, set `APP_MODE="api"` and `BACKEND_URL` to the backend's address in the Streamlit secrets.
 
 ## Notes on changes from the project document
 

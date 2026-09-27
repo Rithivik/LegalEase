@@ -1,10 +1,17 @@
 """
 app.py - Streamlit frontend for LegalEase.
 
-Run from the project root (with the backend already running):
-    streamlit run frontend/app.py
+Local:   streamlit run frontend/app.py   (uses the FastAPI backend when it is running)
+Online:  deployed on Streamlit Community Cloud in "standalone" mode - the app calls
+         Gemini directly because the cloud only runs this Streamlit file.
+
+APP_MODE (in .env or Streamlit secrets):
+    auto        -> use the backend if it is running, otherwise call Gemini directly (default)
+    api         -> always use the FastAPI backend
+    standalone  -> never use the backend; call Gemini directly
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,11 +23,22 @@ if str(ROOT) not in sys.path:
 import requests  # noqa: E402
 import streamlit as st  # noqa: E402
 
+# On Streamlit Cloud the API key lives in "Secrets", not in .env.
+# Copy the secrets into environment variables BEFORE config is imported.
+try:
+    for _key, _value in st.secrets.items():
+        if isinstance(_value, (str, int, float, bool)):
+            os.environ.setdefault(_key, str(_value))
+except Exception:  # no secrets file (normal when running locally)
+    pass
+
 import config  # noqa: E402
+from ai_core.gemini_generator import GeminiDocumentGenerator, GenerationError  # noqa: E402
 from ai_core.generator import (PREVIEW_CSS, format_docx, format_html_preview,  # noqa: E402
                                format_pdf, format_txt, safe_filename, sanitize_text)
 
 BACKEND_URL = config.BACKEND_URL
+APP_MODE = os.getenv("APP_MODE", "auto").strip().lower()
 CUSTOM_TYPE = "Other (type your own)..."
 
 EXAMPLE = {
@@ -97,6 +115,47 @@ def backend_health(url: str) -> dict:
     return {"ok": True, **data}
 
 
+@st.cache_resource(show_spinner=False)
+def get_local_generator() -> GeminiDocumentGenerator:
+    """Gemini generator used in standalone mode (created once per server)."""
+    return GeminiDocumentGenerator()
+
+
+def generate_via_backend(payload: dict) -> tuple[str, str]:
+    """Call the FastAPI backend. Returns (document_text, model). Raises RuntimeError."""
+    try:
+        response = requests.post(f"{BACKEND_URL}/generate", json=payload,
+                                  timeout=config.REQUEST_TIMEOUT)
+    except requests.ConnectionError:
+        raise RuntimeError(f"Could not connect to the backend at {BACKEND_URL}. "
+                           "Is `python -m uvicorn legalEaseAPI.main:app --reload` running?")
+    except requests.Timeout:
+        raise RuntimeError("The request timed out. Please try again.")
+    if not response.ok:
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = response.text
+        if isinstance(detail, list):  # FastAPI validation errors
+            detail = "; ".join(f"{'.'.join(map(str, d.get('loc', [])[1:]))}: {d.get('msg')}"
+                               for d in detail)
+        raise RuntimeError(f"Error {response.status_code}: {detail}")
+    data = response.json()
+    return data["document"], data.get("model", "")
+
+
+def generate_directly(payload: dict) -> tuple[str, str]:
+    """Call Gemini from this app (standalone mode). Raises RuntimeError."""
+    try:
+        gen = get_local_generator()
+        text = gen.generate_document(
+            payload["document_type"], payload["parties"], payload["terms"],
+            payload["dates"], payload["jurisdiction"], payload["additional_instructions"])
+    except GenerationError as exc:
+        raise RuntimeError(f"Error {exc.status_code}: {exc.message}")
+    return text, ("mock" if gen.mock else gen.model_name)
+
+
 @st.cache_data(show_spinner=False, max_entries=20)
 def build_files(text: str, doc_type: str, terms: str, logo_bytes, footer: str):
     """Create TXT / DOCX / PDF bytes (cached so reruns stay fast)."""
@@ -112,16 +171,30 @@ def build_files(text: str, doc_type: str, terms: str, logo_bytes, footer: str):
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Settings")
-    # Only re-check while not connected (or when the button is clicked)
-    if not st.session_state.get("health", {}).get("ok"):
-        with st.spinner("Checking backend..."):
-            st.session_state.health = backend_health(BACKEND_URL)
-    health = st.session_state.health
+    use_backend = False
+    if APP_MODE == "standalone":
+        health = {"ok": False, "reason": "standalone"}
+    else:
+        # Only re-check while not connected (or when the button is clicked)
+        if not st.session_state.get("health", {}).get("ok"):
+            with st.spinner("Checking backend..."):
+                st.session_state.health = backend_health(BACKEND_URL)
+        health = st.session_state.health
 
     if health["ok"]:
+        use_backend = True
         mode = ("Mock mode (no API key)" if health.get("mock_mode")
                 else f"Gemini: `{health.get('model')}`")
         st.success(f"Backend connected\n\n{mode}")
+    elif APP_MODE != "api" and health["reason"] in ("standalone", "not_running"):
+        # No backend (e.g. Streamlit Cloud): call Gemini directly from this app
+        try:
+            local = get_local_generator()
+            mode = ("Mock mode (no API key)" if local.mock
+                    else f"Gemini: `{local.model_name}`")
+            st.success(f"Standalone mode\n\n{mode}")
+        except GenerationError as exc:
+            st.error(f"Gemini setup failed:\n\n{exc.message}")
     elif health["reason"] == "not_running":
         st.error(f"Backend not running at {BACKEND_URL}.\n\n"
                  "Start it in another terminal:\n"
@@ -131,7 +204,7 @@ with st.sidebar:
     else:
         st.error(f"Backend is running but reported a problem:\n\n{health.get('error')}")
 
-    if st.button("🔄 Recheck backend"):
+    if APP_MODE != "standalone" and st.button("🔄 Recheck backend"):
         st.session_state.health = backend_health(BACKEND_URL)
         st.rerun()
 
@@ -201,31 +274,19 @@ if st.button("Generate Document", type="primary"):
         }
         with st.spinner("Drafting your document with Gemini... this can take 20-60 seconds."):
             try:
-                response = requests.post(f"{BACKEND_URL}/generate", json=payload,
-                                         timeout=config.REQUEST_TIMEOUT)
-                if response.ok:
-                    data = response.json()
-                    st.session_state.generated_text = sanitize_text(data["document"])
-                    st.session_state.document_type = document_type
-                    st.session_state.terms_used = st.session_state.terms
-                    st.session_state.model_used = data.get("model", "")
-                    st.session_state.gen_id += 1
-                    st.session_state.show_edit = False
-                    st.success("✅ Document Generated Successfully!")
+                if use_backend:
+                    text, model_used = generate_via_backend(payload)
                 else:
-                    try:
-                        detail = response.json().get("detail")
-                    except ValueError:
-                        detail = response.text
-                    if isinstance(detail, list):  # FastAPI validation errors
-                        detail = "; ".join(f"{'.'.join(map(str, d.get('loc', [])[1:]))}: {d.get('msg')}"
-                                           for d in detail)
-                    st.error(f"Error {response.status_code}: {detail}")
-            except requests.ConnectionError:
-                st.error(f"Could not connect to the backend at {BACKEND_URL}. "
-                         "Is `uvicorn legalEaseAPI.main:app --reload` running?")
-            except requests.Timeout:
-                st.error("The request timed out. Please try again.")
+                    text, model_used = generate_directly(payload)
+                st.session_state.generated_text = sanitize_text(text)
+                st.session_state.document_type = document_type
+                st.session_state.terms_used = st.session_state.terms
+                st.session_state.model_used = model_used
+                st.session_state.gen_id += 1
+                st.session_state.show_edit = False
+                st.success("✅ Document Generated Successfully!")
+            except RuntimeError as exc:
+                st.error(str(exc))
 
 # ---------------------------------------------------------------------------
 # Preview, edit and download

@@ -7,3 +7,4 @@ __pycache__/
 *.docx
 *.pdf
 !docs/*.pdf
+.streamlit/secrets.toml
