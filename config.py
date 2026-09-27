@@ -40,7 +40,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
 GEMINI_FALLBACK_MODELS = [
     m.strip()
     for m in os.getenv(
-        "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-pro-latest"
+        "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite"
     ).split(",")
     if m.strip()
 ]

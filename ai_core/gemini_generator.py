@@ -132,6 +132,7 @@ class GeminiDocumentGenerator:
         models = [self.model_name] + [m for m in config.GEMINI_FALLBACK_MODELS
                                       if m != self.model_name]
         last_error: Exception | None = None
+        rate_limited: list[str] = []
 
         for model in models:
             try:
@@ -157,9 +158,10 @@ class GeminiDocumentGenerator:
                         "Gemini rejected the API key. Check GEMINI_API_KEY in your .env file.",
                         401) from exc
                 if code == 429:
-                    raise GenerationError(
-                        "Gemini rate limit / quota reached. Wait a minute and try again.",
-                        429) from exc
+                    # Quota/rate limit for THIS model -> try the next model
+                    logger.warning("Quota reached for %s, trying next model", model)
+                    rate_limited.append(model)
+                    continue
                 raise GenerationError(f"Gemini request error: {exc}", 400) from exc
 
             except errors.ServerError as exc:  # 5xx errors
@@ -173,6 +175,12 @@ class GeminiDocumentGenerator:
             except Exception as exc:  # network problems etc.
                 raise GenerationError(f"Could not reach Gemini: {exc}", 503) from exc
 
+        if rate_limited and len(rate_limited) == len(models):
+            raise GenerationError(
+                "Gemini free-tier quota reached for every model tried "
+                f"({', '.join(models)}). Wait a minute and try again. If it keeps "
+                "happening, the daily free limit is used up - try again tomorrow or "
+                "use another API key.", 429)
         raise GenerationError(
             f"No Gemini model was available (tried: {', '.join(models)}). "
             f"Set GEMINI_MODEL in .env to a model your key can use. Last error: {last_error}",
