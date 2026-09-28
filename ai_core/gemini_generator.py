@@ -128,10 +128,10 @@ class GeminiDocumentGenerator:
             max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
         )
 
-        # Try the main model first, then fallbacks if the model is not available
+        # Try the main model first, then the fallbacks
         models = [self.model_name] + [m for m in config.GEMINI_FALLBACK_MODELS
                                       if m != self.model_name]
-        last_error: Exception | None = None
+        failures: dict[str, str] = {}   # model -> short reason, shown to the user
         rate_limited: list[str] = []
 
         for model in models:
@@ -149,23 +149,23 @@ class GeminiDocumentGenerator:
 
             except errors.ClientError as exc:  # 4xx errors
                 code = getattr(exc, "code", 400)
-                last_error = exc
                 if code == 404:
+                    failures[model] = "not available for this API key (404)"
                     logger.warning("Model %s not found, trying next model", model)
                     continue
                 if code in (401, 403) or "API key" in str(exc):
                     raise GenerationError(
-                        "Gemini rejected the API key. Check GEMINI_API_KEY in your .env file.",
-                        401) from exc
+                        "Gemini rejected the API key. Check GEMINI_API_KEY in your "
+                        ".env file / Streamlit secrets.", 401) from exc
                 if code == 429:
-                    # Quota/rate limit for THIS model -> try the next model
-                    logger.warning("Quota reached for %s, trying next model", model)
+                    failures[model] = "free-tier quota / rate limit reached (429)"
                     rate_limited.append(model)
+                    logger.warning("Quota reached for %s, trying next model", model)
                     continue
-                raise GenerationError(f"Gemini request error: {exc}", 400) from exc
+                raise GenerationError(f"Gemini request error ({model}): {exc}", 400) from exc
 
             except errors.ServerError as exc:  # 5xx errors
-                last_error = exc
+                failures[model] = f"Google server busy/error ({getattr(exc, 'code', 500)})"
                 logger.warning("Gemini server error on %s: %s", model, exc)
                 continue
 
@@ -175,16 +175,19 @@ class GeminiDocumentGenerator:
             except Exception as exc:  # network problems etc.
                 raise GenerationError(f"Could not reach Gemini: {exc}", 503) from exc
 
+        details = "; ".join(f"{m}: {r}" for m, r in failures.items())
         if rate_limited and len(rate_limited) == len(models):
             raise GenerationError(
-                "Gemini free-tier quota reached for every model tried "
-                f"({', '.join(models)}). Wait a minute and try again. If it keeps "
-                "happening, the daily free limit is used up - try again tomorrow or "
-                "use another API key.", 429)
+                "Gemini free-tier quota reached for every model tried. Wait a minute "
+                "and try again; if it keeps happening, the daily limit is used up "
+                f"(it resets around 12:30 pm IST). Details - {details}", 429)
+        if rate_limited:
+            raise GenerationError(
+                "Gemini quota reached for your model and no fallback model worked. "
+                f"Wait a minute and try again. Details - {details}", 429)
         raise GenerationError(
-            f"No Gemini model was available (tried: {', '.join(models)}). "
-            f"Set GEMINI_MODEL in .env to a model your key can use. Last error: {last_error}",
-            502)
+            "No Gemini model was available. Set GEMINI_MODEL to a model your key can "
+            f"use (check the model list in Google AI Studio). Details - {details}", 502)
 
     @staticmethod
     def _clean_output(text: str) -> str:
